@@ -19,7 +19,7 @@
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
 
-#include "behaviortree_cpp/bt_factory.h"
+#include "behaviortree_cpp_v3/bt_factory.h"
 
 #include "nav2_behavior_tree/utils/test_action_server.hpp"
 #include "opennav_docking_bt/dock_robot.hpp"
