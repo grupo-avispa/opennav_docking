@@ -226,12 +226,12 @@ void DockingServer::dockRobot()
     if (goal->use_dock_id) {
       RCLCPP_INFO(
         get_logger(),
-        "Attempting to dock robot at charger %s.", goal->dock_id.c_str());
+        "Attempting to dock robot at %s.", goal->dock_id.c_str());
       dock = dock_db_->findDock(goal->dock_id);
     } else {
       RCLCPP_INFO(
         get_logger(),
-        "Attempting to dock robot at charger at position (%0.2f, %0.2f).",
+        "Attempting to dock robot at position (%0.2f, %0.2f).",
         goal->dock_pose.pose.position.x, goal->dock_pose.pose.position.y);
       dock = generateGoalDock(goal);
     }
@@ -266,9 +266,14 @@ void DockingServer::dockRobot()
         // Approach the dock using control law
         if (approachDock(dock, dock_pose)) {
           // We are docked, wait for charging to begin
-          RCLCPP_INFO(get_logger(), "Made contact with dock, waiting for charge to start");
+          RCLCPP_INFO(
+            get_logger(), "Made contact with dock, waiting for charge to start (if applicable).");
           if (waitForCharge(dock)) {
-            RCLCPP_INFO(get_logger(), "Robot is charging!");
+            if (dock->plugin->isCharger()) {
+              RCLCPP_INFO(get_logger(), "Robot is charging!");
+            } else {
+              RCLCPP_INFO(get_logger(), "Docking was successful!");
+            }
             result->success = true;
             result->num_retries = num_retries_;
             stashDockData(goal->use_dock_id, dock, true);
@@ -286,7 +291,7 @@ void DockingServer::dockRobot()
       } catch (opennav_docking_core::DockingException & e) {
         if (++num_retries_ > max_retries_) {
           RCLCPP_ERROR(get_logger(), "Failed to dock, all retries have been used");
-          throw;
+          throw e;
         }
         RCLCPP_WARN(get_logger(), "Docking failed, will retry: %s", e.what());
       }
@@ -365,7 +370,7 @@ void DockingServer::doInitialPerception(Dock * dock, geometry_msgs::msg::PoseSta
   rclcpp::Rate loop_rate(controller_frequency_);
   auto start = this->now();
   auto timeout = rclcpp::Duration::from_seconds(initial_perception_timeout_);
-  while (!dock->plugin->getRefinedPose(dock_pose)) {
+  while (!dock->plugin->getRefinedPose(dock_pose, dock->id)) {
     if (this->now() - start > timeout) {
       throw opennav_docking_core::FailedToDetectDock("Failed initial dock detection");
     }
@@ -389,7 +394,7 @@ bool DockingServer::approachDock(Dock * dock, geometry_msgs::msg::PoseStamped & 
     publishDockingFeedback(DockRobot::Feedback::CONTROLLING);
 
     // Stop and report success if connected to dock
-    if (dock->plugin->isDocked() || dock->plugin->isCharging()) {
+    if (dock->plugin->isDocked() || (dock->plugin->isCharger() && dock->plugin->isCharging())) {
       return true;
     }
 
@@ -401,7 +406,7 @@ bool DockingServer::approachDock(Dock * dock, geometry_msgs::msg::PoseStamped & 
     }
 
     // Update perception
-    if (!dock->plugin->getRefinedPose(dock_pose)) {
+    if (!dock->plugin->getRefinedPose(dock_pose, dock->id)) {
       throw opennav_docking_core::FailedToDetectDock("Failed dock detection");
     }
 
@@ -435,7 +440,7 @@ bool DockingServer::approachDock(Dock * dock, geometry_msgs::msg::PoseStamped & 
 
     if (this->now() - start > timeout) {
       throw opennav_docking_core::FailedToControl(
-              "Timed out approaching dock; dock nor charging detected");
+              "Timed out approaching dock; dock nor charging (if applicable) detected");
     }
 
     loop_rate.sleep();
@@ -445,6 +450,11 @@ bool DockingServer::approachDock(Dock * dock, geometry_msgs::msg::PoseStamped & 
 
 bool DockingServer::waitForCharge(Dock * dock)
 {
+  // This is a non-charger docking request
+  if (!dock->plugin->isCharger()) {
+    return true;
+  }
+
   rclcpp::Rate loop_rate(controller_frequency_);
   auto start = this->now();
   auto timeout = rclcpp::Duration::from_seconds(wait_charge_timeout_);
@@ -573,7 +583,7 @@ void DockingServer::undockRobot()
     }
     RCLCPP_INFO(
       get_logger(),
-      "Attempting to undock robot from charger of type %s.", dock->getName().c_str());
+      "Attempting to undock robot of dock type %s.", dock->getName().c_str());
 
     // Get "dock pose" by finding the robot pose
     geometry_msgs::msg::PoseStamped dock_pose = getRobotPoseInFrame(fixed_frame_);
@@ -601,7 +611,7 @@ void DockingServer::undockRobot()
       }
 
       // Don't control the robot until charging is disabled
-      if (!dock->disableCharging()) {
+      if (dock->isCharger() && !dock->disableCharging()) {
         loop_rate.sleep();
         continue;
       }
@@ -615,7 +625,7 @@ void DockingServer::undockRobot()
         RCLCPP_INFO(get_logger(), "Robot has reached staging pose");
         // Have reached staging_pose
         vel_publisher_->publish(command);
-        if (dock->hasStoppedCharging()) {
+        if (!dock->isCharger() || dock->hasStoppedCharging()) {
           RCLCPP_INFO(get_logger(), "Robot has undocked!");
           result->success = true;
           curr_dock_type_.clear();
@@ -624,7 +634,7 @@ void DockingServer::undockRobot()
           return;
         }
         // Haven't stopped charging?
-        throw opennav_docking_core::FailedToControl("Failed to control off dock, still charging");
+        throw opennav_docking_core::FailedToControl("Failed to control off dock");
       }
 
       // Publish command and sleep
